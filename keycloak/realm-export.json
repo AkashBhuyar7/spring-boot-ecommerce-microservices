@@ -1,0 +1,23 @@
+{
+  "realm": "spring-boot-microservices-realm",
+  "displayName": "Spring Boot Microservices (local development)",
+  "enabled": true,
+  "sslRequired": "none",
+  "accessTokenLifespan": 900,
+  "clients": [
+    {
+      "clientId": "spring-cloud-client",
+      "name": "Spring Cloud client",
+      "description": "Local development client for calling the API gateway with the client-credentials grant. The secret is for local use only.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "spring-cloud-client-dev-secret",
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false
+    }
+  ]
+}

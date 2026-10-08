@@ -1,0 +1,244 @@
+# Local development stack.
+#   Everything:            docker compose up -d
+#   Infrastructure only:   docker compose up -d kafka kafka-ui keycloak zipkin mongodb sqlserver sqlserver-init
+# Credentials come from .env (see .env.example); the defaults below are for local development only.
+
+name: spring-boot-ecommerce-microservices
+
+# Settings shared by the Eureka client services
+x-service-environment: &service-environment
+  EUREKA_URL: http://discovery-server:8761/eureka
+  EUREKA_PREFER_IP_ADDRESS: "true"
+  ZIPKIN_URL: http://zipkin:9411/api/v2/spans
+  JAVA_TOOL_OPTIONS: -Xmx256m
+
+services:
+
+  kafka:
+    image: apache/kafka:4.1.1
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      # INTERNAL is used by containers on the compose network, EXTERNAL by apps running on the host
+      KAFKA_LISTENERS: INTERNAL://:29092,EXTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      # Single broker: internal topics cannot be replicated more than once
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 15s
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    container_name: kafka-ui
+    ports:
+      - "9091:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.5.4
+    container_name: keycloak
+    command: start-dev --import-realm
+    ports:
+      - "8181:8181"
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USERNAME:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KC_HTTP_PORT: 8181
+      # Tokens always carry iss=http://localhost:8181/..., whether they are requested from the host or from a container
+      KC_HOSTNAME: http://localhost:8181
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+    volumes:
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+
+  zipkin:
+    image: openzipkin/zipkin:3.5.1
+    container_name: zipkin
+    ports:
+      - "9411:9411"
+
+  mongodb:
+    image: mongo:7.0
+    container_name: mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      # mongosh starts slowly when the machine is busy (e.g. during the first build)
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-CU20-ubuntu-22.04
+    container_name: sqlserver
+    ports:
+      - "1433:1433"
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:-LocalDev_Passw0rd}
+    volumes:
+      - sqlserver-data:/var/opt/mssql
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P \"$${MSSQL_SA_PASSWORD}\" -Q 'SELECT 1' -b -o /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  # One-shot job: creates the inventory_service and order_service databases, then exits
+  sqlserver-init:
+    image: mcr.microsoft.com/mssql/server:2022-CU20-ubuntu-22.04
+    container_name: sqlserver-init
+    environment:
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:-LocalDev_Passw0rd}
+    volumes:
+      - ./sqlserver/init.sql:/init.sql:ro
+    entrypoint: ["/bin/bash", "-c", "/opt/mssql-tools18/bin/sqlcmd -C -S sqlserver -U sa -P \"$${MSSQL_SA_PASSWORD}\" -b -i /init.sql"]
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # Application services, all built from the root Dockerfile.
+  # Only the gateway (8080) and Eureka (8761) are published; everything else is
+  # reached through the gateway.
+  # ---------------------------------------------------------------------------
+
+  discovery-server:
+    build:
+      context: .
+      args:
+        MODULE: discovery-server
+    image: spring-boot-ecommerce-microservices/discovery-server
+    container_name: discovery-server
+    ports:
+      - "8761:8761"
+    environment:
+      EUREKA_INSTANCE_HOSTNAME: discovery-server
+      ZIPKIN_URL: http://zipkin:9411/api/v2/spans
+      JAVA_TOOL_OPTIONS: -Xmx256m
+    restart: on-failure
+
+  api-gateway:
+    build:
+      context: .
+      args:
+        MODULE: api-gateway
+    image: spring-boot-ecommerce-microservices/api-gateway
+    container_name: api-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      <<: *service-environment
+      EUREKA_DASHBOARD_URL: http://discovery-server:8761
+      # Keys are fetched inside the compose network; the issuer must match the "iss" claim of tokens issued on localhost
+      KEYCLOAK_ISSUER_URI: http://localhost:8181/realms/spring-boot-microservices-realm
+      KEYCLOAK_JWK_SET_URI: http://keycloak:8181/realms/spring-boot-microservices-realm/protocol/openid-connect/certs
+    depends_on:
+      - discovery-server
+      - keycloak
+    restart: on-failure
+
+  product-service:
+    build:
+      context: .
+      args:
+        MODULE: product-service
+    image: spring-boot-ecommerce-microservices/product-service
+    container_name: product-service
+    environment:
+      <<: *service-environment
+      MONGODB_URI: mongodb://mongodb:27017/product-service
+    depends_on:
+      discovery-server:
+        condition: service_started
+      mongodb:
+        condition: service_healthy
+    restart: on-failure
+
+  inventory-service:
+    build:
+      context: .
+      args:
+        MODULE: inventory-service
+    image: spring-boot-ecommerce-microservices/inventory-service
+    container_name: inventory-service
+    environment:
+      <<: *service-environment
+      SQLSERVER_HOST: sqlserver
+      DB_PASSWORD: ${MSSQL_SA_PASSWORD:-LocalDev_Passw0rd}
+    depends_on:
+      discovery-server:
+        condition: service_started
+      sqlserver-init:
+        condition: service_completed_successfully
+    restart: on-failure
+
+  order-service:
+    build:
+      context: .
+      args:
+        MODULE: order-service
+    image: spring-boot-ecommerce-microservices/order-service
+    container_name: order-service
+    environment:
+      <<: *service-environment
+      SQLSERVER_HOST: sqlserver
+      DB_PASSWORD: ${MSSQL_SA_PASSWORD:-LocalDev_Passw0rd}
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    depends_on:
+      discovery-server:
+        condition: service_started
+      sqlserver-init:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_healthy
+    restart: on-failure
+
+  notification-service:
+    build:
+      context: .
+      args:
+        MODULE: notification-service
+    image: spring-boot-ecommerce-microservices/notification-service
+    container_name: notification-service
+    environment:
+      <<: *service-environment
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    depends_on:
+      discovery-server:
+        condition: service_started
+      kafka:
+        condition: service_healthy
+    restart: on-failure
+
+volumes:
+  mongodb-data:
+  sqlserver-data:

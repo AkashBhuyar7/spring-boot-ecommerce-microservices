@@ -1,0 +1,29 @@
+# Build output
+target/
+
+# Eclipse / Spring Tools
+.classpath
+.project
+.settings/
+.factorypath
+.apt_generated/
+.apt_generated_tests/
+.springBeans
+.sts4-cache/
+
+# IntelliJ IDEA
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# VS Code
+.vscode/
+
+# Local environment (copy .env.example to .env)
+.env
+
+# Logs and OS files
+*.log
+.DS_Store
+Thumbs.db
